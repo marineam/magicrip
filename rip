@@ -49,6 +49,8 @@ TAGS="""<?xml version="1.0" encoding="UTF-8"?>
 </Tags>
 """
 
+DIRECTORY = os.environ.get("MAGIC_RIP_DIRECTORY", os.getcwd())
+
 # lsdvd reports ISO639-1 codes but HandBrake uses ISO639-2 *sigh*
 LANGS = {
     'en': 'eng',
@@ -174,8 +176,8 @@ def main():
             help="subtitle track to display by default")
     parser.add_option("-i", "--deinterlace", action="store_true",
             help="use the full deinterlace filter")
-    parser.add_option("-D", "--directory", default="/data/Videos",
-                      help="default destination directory")
+    parser.add_option("-D", "--directory", default=DIRECTORY,
+            help="destination directory")
     parser.add_option("-P", "--append", help="append to an existing file")
     parser.add_option("--no-dvdnav", action="store_true",
             help="do not use dvdnav for reading DVDs (on by default)")
