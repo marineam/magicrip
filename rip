@@ -1,0 +1,406 @@
+#!/usr/bin/python
+
+import re
+import os
+import sys
+import time
+import optparse
+import tempfile
+import subprocess
+from cStringIO import StringIO
+from lxml import etree
+
+"""Mike's Automagic DVD Ripper Script
+
+By default is incluses all audio and subtitle tracks from the selected
+dvd video track. If --alang or --slang is provided it will re-order
+the audio and subtitle tracks so the prefered lang is first. If the
+two are the same the default subtitle track will include forced
+subtitles if there are any. If they are different it will be the first
+subtitle track with the given languaged.
+
+# Go full automagic:
+    rip
+
+# Set the title:
+    rip --title "This awesome movie"
+
+# Choose only a few chaperts:
+    rip --chapters 1-5
+
+# Switch default audio to French:
+    rip --alang fr
+    (--slang en is the default so English subtitles witll turn on)
+
+# Choose your own audo and sibtitle tracks:
+    rip --audio 1,4 --subtitles auto,1,2
+    (auto looks for forced subtitles)
+"""
+
+TAGS="""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE Tags SYSTEM "matroskatags.dtd">
+<Tags>
+    <Tag>
+        <Simple>
+            <Name>TITLE</Name>
+            <String></String>
+        </Simple>
+    </Tag>
+</Tags>
+"""
+
+# lsdvd reports ISO639-1 codes but HandBrake uses ISO639-2 *sigh*
+LANGS = {
+    'en': 'eng',
+    'fr': 'fra',
+    'es': 'spa',
+    'ja': 'jpn',
+}
+RLANG = dict((v,k) for k,v in LANGS.iteritems())
+
+# subtitle scan is pretty unreliable...
+SCAN = False
+
+def die(msg):
+    sys.stderr.write("%s\n" % msg)
+    sys.exit(1)
+
+def format_time(total):
+    hours = total // 3600
+    mins = total // 60 - hours * 60
+    secs = total - hours * 3600 - mins * 60
+    return "%02d:%02d:%.3f" % (hours,mins,secs)
+
+def call(cmd, dry_run):
+    print "Running: %s" % ' '.join(cmd)
+    if dry_run:
+        return
+    code = subprocess.call(cmd)
+    if code != 0:
+        die("%s returned exit code %s" % (cmd[0], code))
+
+def lsdvd(device):
+    proc = subprocess.Popen(['lsdvd', '-x', '-Oy', device],
+                            stdout=subprocess.PIPE)
+    out, err = proc.communicate()
+    if proc.returncode != 0:
+        die("lsdvd returned exit code %s" % proc.returncode)
+
+    # Remove this silly prefix so eval works
+    out = out.replace("lsdvd = ", "", 1)
+
+    try:
+        info = eval(out, {})
+    except Exception, ex:
+        die("failed to parse lsdvd output: %s" % ex)
+
+    return info
+
+def mkvinfo(filename):
+    proc = subprocess.Popen(['mkvinfo', filename], stdout=subprocess.PIPE)
+    out, err = proc.communicate()
+    if proc.returncode != 0:
+        die("mkvinfo returned exit code %s" % proc.returncode)
+
+    info = {}
+    track = None
+
+    def add(track):
+        if track is None or 'Track type' not in track:
+            return
+        if track['Track type'] not in info:
+            info[track['Track type']] = [track]
+        else:
+            info[track['Track type']].append(track)
+
+    for line in out.splitlines():
+        if line == "| + A track":
+            add(track)
+            track = {}
+        elif track is not None and line.startswith("|  + "):
+            if ':' in line:
+                key, value = line[5:].split(':', 1)
+                track[key.strip()] = value.strip()
+        else:
+            add(track)
+            track = None
+
+    if not info:
+        die("failed to parse mkvinfo")
+
+    return info
+
+def mktitle(title):
+    title = title.replace("_", " ")
+    title = re.sub(r"[A-Za-z]+('[A-Za-z]+)?",
+        lambda mo: mo.group(0)[0].upper() + mo.group(0)[1:].lower(), title)
+    title = re.sub(r"(?<=.)(A|And|Or|Of|The|To|At)(?=\W)",
+        lambda mo: mo.group(0).lower(), title)
+    return title
+
+def mkfilename(title):
+    filename = re.sub(r"\s+", "_", title)
+    filename = re.sub(r"_+-_+", "-", filename)
+    filename = re.sub(r"[\'\"\?\!\.\(\):]", "", filename)
+    return filename
+
+def mktags(filename, title, dry_run):
+    # TODO: Are there other bits of information I can provide?
+    title = title.decode('UTF-8')
+    xml = etree.parse(StringIO(TAGS))
+    xml.find("/Tag/Simple/String").text = title
+    if not dry_run:
+        xml.write(filename, encoding="UTF-8",
+                xml_declaration=True, pretty_print=True)
+
+def main():
+    start = time.time()
+    parser = optparse.OptionParser()
+    parser.add_option("-d", "--device", default="/dev/dvd",
+                      help="dvd device")
+    parser.add_option("-t", "--track", type="int", help="dvd track")
+    parser.add_option("-c", "--chapters", help="dvd track chapters")
+    parser.add_option("-T", "--title", help="title of this video")
+    parser.add_option("-l", "--lang", help="set both alang/slang")
+    parser.add_option("-a", "--alang",
+            default='en', help="default audio language")
+    parser.add_option("-s", "--slang",
+            default='en', help="default subtitle language")
+    parser.add_option("-A", "--audio",
+            help="audio track(s) (ignores --alang)")
+    parser.add_option("-S", "--subtitles", default="",
+            help="subtitle track(s) (mostly ignores --slang)")
+    parser.add_option("--default-subtitles",
+            help="subtitle track to display by default")
+    parser.add_option("-i", "--deinterlace", action="store_true",
+            help="use the full deinterlace filter")
+    parser.add_option("-D", "--directory", default="/data/Videos",
+                      help="default destination directory")
+    parser.add_option("-P", "--append", help="append to an existing file")
+    parser.add_option("--no-dvdnav", action="store_true",
+            help="do not use dvdnav for reading DVDs (on by default)")
+    parser.add_option("--no-lsdvd", action="store_true",
+            help="do not get dvd contents via lsdvd (on by default)")
+    parser.add_option("-n", "--dry-run", action='store_true', help="dry run")
+    options, args = parser.parse_args()
+
+    if args:
+        parser.error("unexpected positional arguments")
+
+    if options.no_lsdvd:
+        if not options.track:
+            parser.error("--track is required with --no-lsdvd")
+        if not options.audio:
+            parser.error("--audio is required with --no-lsdvd")
+        info = None
+    else:
+        info = lsdvd(options.device)
+
+    if not options.title:
+        if info:
+            options.title = mktitle(info['title'])
+        t = raw_input("Title [%s]: " % options.title)
+        if t:
+            options.title = t
+
+    if not options.title:
+        parser.error("no title")
+
+    # Just make sure it is valid UTF-8
+    options.title.decode('UTF-8')
+
+    output_base = mkfilename(options.title)
+    fd, output_lock = tempfile.mkstemp(dir=options.directory,
+                                       prefix=".%s" % output_base)
+    os.write(fd, "%s\n" % os.getpid())
+    os.close(fd)
+    output_temp = "%s.mkv" % output_lock
+    output_tags = "%s.xml" % output_lock
+    output_file = "%s.mkv" % output_base
+    output_path = os.path.join(options.directory, output_file)
+    output_new = "%s.new.mkv" % output_lock # for append mode
+
+    if not options.track:
+        options.track = info['longest_track']
+
+    index = options.track-1
+    if info and index >= len(info['track']):
+        parser.error("invalid dvd track: %s" % options.track)
+
+    print "Title: %s" % options.title
+    print "Track: %s" % options.track
+    print "File: %s" % output_file
+
+    if options.lang:
+        if options.lang not in LANGS:
+            parser.error("unknown language code: %s" % options.lang)
+        options.alang = options.lang
+        options.slang = options.lang
+    else:
+        # Accept both 2 and 3 letter codes
+        if options.alang in RLANG:
+            options.alang = RLANG[options.alang]
+        elif options.alang not in LANGS:
+            parser.error("unknown language code: %s" % options.alang)
+        if options.slang in RLANG:
+            options.slang = RLANG[options.slang]
+        elif options.slang not in LANGS:
+            parser.error("unknown language code: %s" % options.slang)
+
+    print "Default Audio: %s" % options.alang
+    print "Default Subtitles: %s" % options.slang
+    if info:
+        print "Video: %d, Length: %s, Chapters: %s" % (
+                options.track, format_time(info['track'][index]['length']),
+                len(info['track'][index]['chapter']))
+
+    audio_default = None
+    if info and not options.audio:
+        tracks = []
+        found = False
+        for track in info['track'][index]['audio']:
+            tracks.append(str(track['ix']))
+            if not found and track['langcode'] == options.alang:
+                audio_default = track['ix']
+                found = True
+            print "Audio: %d, Language: %s, Content: %s%s" % (
+                    track['ix'], track['langcode'], track['content'],
+                    " (default)" if track['ix'] == audio_default else "")
+        if not tracks:
+            parser.error("no audo tracks found")
+        if not found:
+            parser.error("no %s audio track" % options.alang)
+        options.audio = ','.join(tracks)
+    else:
+        audio_default = int(options.audio.split(',',1)[0])
+   
+    if info and not options.subtitles:
+        default = None
+        if options.alang == options.slang:
+            if SCAN:
+                # Enable forced subtitle scanning
+                found = True
+                tracks = ['scan']
+                default = 'scan'
+            else:
+                found = True
+                tracks = []
+        else:
+            # Otherwise default to our preferred language
+            found = False
+            tracks = []
+        for track in info['track'][index]['subp']:
+            tracks.append(str(track['ix']))
+            if not found and track['langcode'] == options.slang:
+                default = track['ix']
+                found = True
+            print "Subtitle: %d, Language: %s, Content: %s%s" % (
+                    track['ix'], track['langcode'], track['content'],
+                    " (default)" if track['ix'] == default else "")
+        if not tracks:
+            parser.error("no subtitle tracks found")
+        if not found:
+            parser.error("no %s subtitle track" % options.slang)
+        options.subtitles = ','.join(tracks)
+        if not options.default_subtitles:
+            options.default_subtitles = str(default)
+    elif options.default_subtitles:
+        if options.default_subtitles not in options.subtitles.split(','):
+            parser.error("invalid default subtitle track")
+
+    cmd = ['HandBrakeCLI', '--output=%s' % output_temp, '--large-file',
+            '--input=%s' % options.device, '--preset=High Profile',
+            '--subtitle-burn=none', '--audio=%s' % options.audio ]
+
+    if options.audio != 'none':
+        # Downmix everything to aac/dpl2 for the sake of size
+        count = len(options.audio.split(','))
+        cmd.append('--aencoder=%s' % ','.join(['faac']*count))
+        cmd.append('--mixdown=%s' % ','.join(['dpl2']*count))
+
+    cmd.append('--subtitle=%s' % options.subtitles)
+    if 'scan' in options.subtitles:
+        cmd.extend(['--subtitle-forced=scan',
+                    '--native-language', LANGS[options.slang]])
+    if options.subtitles != 'none' and options.default_subtitles:
+        cmd.append('--subtitle-default=%s' % options.default_subtitles)
+
+    cmd.append('--title=%s' % options.track)
+
+    if options.chapters:
+        cmd.append('--chapters=%s', options.chapters)
+
+    if options.deinterlace:
+        cmd.append('--deinterlace=slower')
+
+    if options.no_dvdnav:
+        cmd.append('--no-dvdnav')
+
+    # This rewrites the entire file, but there isn't a good tagger :-/
+    # There also doesn't seem to be an argument to set the default
+    # audio track in HandBrakeCLI so we twiddle it here instead.
+    # Note: audio track #1 is mkv track #2 because video is #1.
+    merge = ['mkvmerge', '--title', options.title,
+             '--global-tags', output_tags,
+             '--default-track', str(audio_default+1)]
+
+    if (not options.dry_run and not options.append
+            and os.path.exists(output_path)):
+        die("Output target exists: %s" % output_path)
+    if not options.dry_run and os.path.exists(output_temp):
+        os.unlink(output_temp)
+    if not options.dry_run and os.path.exists(output_new):
+        os.unlink(output_new)
+
+    try:
+        call(cmd, options.dry_run)
+        if not options.dry_run and not os.path.exists(output_temp):
+            die("%s failed to write out anything!")
+
+        # We may not have a default subtitle track but mkvmerge
+        # always sets one as default unless we tell it not to.
+        # We also don't know if there is one or not when using 'scan'
+        # so mkvinfo is required to query the output file
+        if not options.dry_run:
+            new = mkvinfo(output_temp)
+            subtitles_default = None
+            subtitles_tracks = []
+            for track in mkvinfo(output_temp).get('subtitles', ()):
+                subtitles_tracks.append(track['Track number'])
+                if track['Default flag'] == '1':
+                    subtitles_default = track['Track number']
+
+            if subtitles_default:
+                merge.extend(['--default-track', subtitles_default])
+            else:
+                for id in subtitles_tracks:
+                    merge.extend(['--default-track', '%s:0' % id])
+
+        mktags(output_tags, options.title, options.dry_run)
+
+        if options.append:
+            merge.extend(['-o', output_new, '--append-mode', 'file',
+                          '--no-global-tags', options.append,
+                          '+%s' % output_temp])
+            call(merge, options.dry_run)
+            os.rename(output_new, options.append)
+        else:
+            merge.extend(['-o', output_path, output_temp])
+            call(merge, options.dry_run)
+
+    finally:
+        if not options.dry_run and os.path.exists(output_tags):
+            os.unlink(output_tags)
+        if not options.dry_run and os.path.exists(output_temp):
+            os.unlink(output_temp)
+        if not options.dry_run and os.path.exists(output_new):
+            os.unlink(output_new)
+        if os.path.exists(output_lock):
+            os.unlink(output_lock)
+
+    if not options.dry_run:
+        runtime = time.time() - start
+        print "\nTime: %s" % format_time(runtime)
+
+if __name__ == '__main__':
+    main()
