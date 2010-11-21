@@ -1,0 +1,94 @@
+Mike's Automagic DVD Ripper Script
+==================================
+
+Overview
+--------
+
+This python script uses lsdvd and HandBrakeCLI to automate the process
+of ripping DVDs. Without any options it will scan the DVD for the
+longest video track ("title" in DVD language) and rip it at full
+resolution using h264 and include all of the audio and subtitle tracks.
+The output will be a mkv file, with the filename derived from the title
+of the DVD which comes from the DVD's metadata. Since the title provided
+is only useful half the time at best the script asks for confirmation.
+
+The default audio track is the first English track found. If a different
+language is preferred (you don't want a crappy English dub on a foreign
+film) change the preferred language with --alang. When the default
+language is not English the first English subtitle track is enabled by
+default. The preferred subtitle language can be changed with --slang.
+Note that currently audio is "downmixed" to Dolby Pro Logic II and
+re-encoded (HandBrake's default). Since many DVDs include several
+surround formats the current situation winds up with several nearly
+identical audio tracks. In the future I may figure out a good way to
+guess which tracks are duplicates and which are legitimately different
+such as an unlabeled commentary track.
+
+At the end of the rip the file gets run through mkvmerge to make sure
+the default tracks are selected properly and adds metadata tags with the
+title. (Not many apps actually use mkv metadata but it makes me feel
+better about myself.)
+
+
+Requirements:
+-------------
+
+- lsdvd
+- HandBrakeCLI (http://handbrake.fr/)
+- mkvinfo/mkvmerge (mkvtoolnix)
+
+Note that the last release of HandBrake doesn't have packages available
+for recent distributions but svn snapshot builds are provided and work
+just fine as of this writing.
+
+On Ubuntu::
+    add-apt-repository ppa:stebbins/handbrake-snapshots
+    apt-get update
+    apt-get install handbrake-cli lsdvd mkvtoolnix
+
+
+Known Issues/To Do
+------------------
+
+- Sometimes lsdvd and HandBrake disagree on the number of audio tracks.
+  Recent versions of HandBrakeCLI have a --scan option which could be
+  useful for replacing most or all of lsdvd's use, I'll do it some day.
+  As a work around specify the correct audio tracks with -A.
+
+- HandBrake has a feature to scan the DVD for subtitles that should be
+  enabled by default for brief foreign language segments. However so far
+  I have only found one DVD that had a track the scan enabled and even
+  then it didn't seem to do the right thing. The code is still there but
+  disabled. Are there DVDs that this feature actually works for?
+
+- In reality a lot of what this script does should actually be in
+  HandBrakeCLI instead. Again, I'll do it some day.
+
+- Duplicate audio tracks should be removed. The others should be
+  identified in mkv's metadata. Many but not all DVDs are good about
+  tagging which audio tracks are Director's Commentary.
+
+
+Usage
+-----
+
+Go full automagic::
+
+    rip
+
+Set the title::
+
+    rip --title "This awesome movie"
+
+Choose only a few chapters::
+
+    rip --chapters 1-5
+
+Switch default audio to French (--slang en is the default so English
+subtitles will turn on)::
+
+    rip --alang fr
+
+Choose your own audio and subtitle tracks::
+
+    rip --audio 1,4 --subtitles 1,2

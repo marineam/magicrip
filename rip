@@ -1,4 +1,21 @@
 #!/usr/bin/python
+#
+# Mike's Automagic DVD Ripper Script
+# Copyright (C) 2009-2010 Michael Marineau <mike@marineau.org>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 import re
 import os
@@ -10,32 +27,7 @@ import subprocess
 from cStringIO import StringIO
 from lxml import etree
 
-"""Mike's Automagic DVD Ripper Script
-
-By default is incluses all audio and subtitle tracks from the selected
-dvd video track. If --alang or --slang is provided it will re-order
-the audio and subtitle tracks so the prefered lang is first. If the
-two are the same the default subtitle track will include forced
-subtitles if there are any. If they are different it will be the first
-subtitle track with the given languaged.
-
-# Go full automagic:
-    rip
-
-# Set the title:
-    rip --title "This awesome movie"
-
-# Choose only a few chaperts:
-    rip --chapters 1-5
-
-# Switch default audio to French:
-    rip --alang fr
-    (--slang en is the default so English subtitles witll turn on)
-
-# Choose your own audo and sibtitle tracks:
-    rip --audio 1,4 --subtitles auto,1,2
-    (auto looks for forced subtitles)
-"""
+"""Mike's Automagic DVD Ripper Script"""
 
 TAGS="""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE Tags SYSTEM "matroskatags.dtd">
